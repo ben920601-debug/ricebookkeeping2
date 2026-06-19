@@ -2,7 +2,7 @@ import os
 import json
 import re
 from datetime import datetime
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks # 🚀 引入背景任務
 from pydantic import BaseModel, Field
 from typing import Literal, List, Optional
 
@@ -13,7 +13,7 @@ from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
-    ReplyMessageRequest,
+    PushMessageRequest, # 🚀 改用 PushMessage（主動推播）代替 Reply
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
@@ -38,26 +38,21 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 🚀 初始化唯一大腦：Gemini 2.5 Flash (純同步，控時 4 秒)
-ai_client = genai.Client(
-    api_key=GEMINI_API_KEY,
-    http_options={'timeout': 4}
-)
+# 🚀 移除 4 秒超時限制，讓付費版 Gemini 有充裕的時間（哪怕 6 秒）把結構化 JSON 算得極度精準
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 🔥 Firebase Firestore 實體檔案初始化
+# 🔥 Firebase Firestore 初始化
 cred_path = "firebase-adminsdk.json"
 if os.path.exists(cred_path):
     try:
         cred = credentials.Certificate(cred_path)
         firebase_admin.initialize_app(cred)
         db = firestore.client()
-        print(f"🔥 [DATABASE LOG] 成功讀取 {cred_path}，Firestore 初始化成功！")
+        print(f"🔥 [DATABASE LOG] Firestore 初始化成功！")
     except Exception as e:
         db = None
-        print(f"❌ [DATABASE LOG] 初始化崩潰: {e}")
 else:
     db = None
-    print(f"❌ [DATABASE LOG] 錯誤：找不到 {cred_path} 檔案！")
 
 # ==========================================
 # 📊 Pydantic 資料結構定義
@@ -75,39 +70,28 @@ class SuperRouter(BaseModel):
     ai_reply: Optional[str] = Field(default="", description="回應文字")
 
 # ==========================================
-# 🤖 核心大腦邏輯 (全面回歸純同步，消滅執行緒死結)
+# 🤖 核心大腦邏輯 (純同步運算)
 # ==========================================
 
 def analyze_with_gemini_sync(user_text: str) -> SuperRouter:
-    """【大腦】Gemini 2.5 Flash 純同步安全調用，絕不卡死連線池"""
     prompt = f"""
     你是一個極簡現代風格的個人財務助理「飯糰小幫手」。請分析使用者的輸入：『{user_text}』
-    
-    請遵守以下規則：
-    1. 【主動記帳 (record)】：無論是支出還是收入，精準判斷並拆解存入 records 陣列。
-    2. 【對話中提及收支 (chat_with_record)】：聊天時提到賺錢或花錢。在 ai_reply 用「極其精簡、現代溫暖」的一句話詢問是否要記帳。
-    3. 【純聊天 (chat)】：不含收支的日常問候。在 ai_reply 給出高情商且極簡的回應。此時 records 請務必給空陣列 []。
-    4. 【回應風格】：說話俐落，不長篇大論。
+    請精準判斷收支並拆解存入 records 陣列，或進行日常極簡高情商聊天。
     """
-    
-    # 🚀 移除所有 asyncio 封裝，直攻 Google 伺服器
     response = ai_client.models.generate_content(
         model='gemini-2.5-flash', 
         contents=prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=SuperRouter,
-            temperature=0.4 # 降低溫度，讓強型別 JSON 吐得更快、更穩定
+            temperature=0.3
         ),
     )
-    
-    if response.parsed:
-        return response.parsed
+    if response.parsed: return response.parsed
     return SuperRouter(**json.loads(response.text))
 
 
 def analyze_with_python_fallback(user_text: str) -> SuperRouter:
-    """【最終防線】Python 毫秒級自動化代打"""
     user_text_lower = user_text.lower().strip()
     if any(k in user_text_lower for k in ["查", "報表", "分析", "統計", "花多少", "結餘", "速報"]):
         return SuperRouter(intent="analyze")
@@ -129,28 +113,20 @@ def analyze_with_python_fallback(user_text: str) -> SuperRouter:
             
         if records:
             is_pure_record = len(user_text) <= 10 and not any(k in user_text for k in ["今天", "昨天", "跟", "去", "哈哈", "了"])
-            if is_pure_record:
-                return SuperRouter(intent="record", records=records)
-            else:
-                return SuperRouter(intent="chat_with_record", records=records, ai_reply="⚠️ 系統繁忙中，已啟動安全確認機制。")
+            if is_pure_record: return SuperRouter(intent="record", records=records)
+            else: return SuperRouter(intent="chat_with_record", records=records, ai_reply="⚠️ 系統繁忙中，已啟動安全確認機制。")
     except Exception: pass
     return SuperRouter(intent="chat", ai_reply="👌")
 
 # ==========================================
-# 💾 資料庫管理與 Webhook 入口
+# 💾 資料庫與速報邏輯
 # ==========================================
-def get_line_user_profile(user_id: str) -> str:
-    try:
-        with ApiClient(line_config) as api_client:
-            return MessagingApi(api_client).get_profile(user_id).display_name
-    except Exception: return "飯糰友"
-
 def save_records_to_db(user_id: str, records: List[SingleRecord]):
     if db is None or not records: return False
     try:
         user_ref = db.collection("users").document(user_id)
         if not user_ref.get().exists:
-            user_ref.set({"line_user_id": user_id, "display_name": get_line_user_profile(user_id), "created_at": datetime.utcnow()})
+            user_ref.set({"line_user_id": user_id, "created_at": datetime.utcnow()})
         batch = db.batch()
         for rec in records:
             if rec.amount <= 0: continue
@@ -172,36 +148,37 @@ def get_monthly_quick_summary(user_id: str) -> str:
             data = doc.to_dict(); amt = data.get("amount", 0)
             if data.get("type", "expense") == "income": income_total += amt
             else: expense_total += amt
-        return f"📊 本月極簡速報\n📈 總收入：${income_total}\n📉 總支出：${expense_total}\n💰 淨結餘：${income_total - expense_total}\n\n🌐 詳細明細請至 Web 後台查看。"
+        return f"📊 本月極簡速報\n📈 總收入：${income_total}\n📉 總支出：${expense_total}\n💰 淨結餘：${income_total - expense_total}"
     except Exception: return "⚠️ 查詢速報暫時失敗"
 
+# ==========================================
+# 🌐 執行緒安全 Webhook 入口
+# ==========================================
 PENDING_CONFIRMATIONS = {}
 
 @app.post("/callback")
-def callback(request: Request):
-    """🚀 修正三：入口去掉 async，讓 FastAPI 自動將其分發至線程池，
-    以完美的同步阻塞流去排隊處理 LINE SDK，絕不噴任何 Event Loop 錯誤！
-    """
+async def callback(request: Request, background_tasks: BackgroundTasks):
+    """🚀 核心優化：0.1秒極速秒回 LINE 伺服器，將重度 AI 任務打包丟到背景非同步執行！"""
     signature = request.headers.get("X-Line-Signature")
     if not signature: raise HTTPException(status_code=400, detail="Missing Signature")
     
-    # 用同步方式讀取 Body
-    import asyncio
-    body = asyncio.run(request.body())
+    body = await request.body()
     body_str = body.decode("utf-8")
     
-    try:
-        handler.handle(body_str, signature)
-    except InvalidSignatureError:
-        raise HTTPException(status_code=400, detail="Invalid Signature")
+    # 💥 丟給 FastAPI 背景執行緒，立刻 return "OK" 切斷 LINE 的逾時倒數
+    background_tasks.add_task(handle_line_events_safe, body_str, signature)
     return "OK"
+
+
+def handle_line_events_safe(body_str: str, signature: str):
+    try: handler.handle(body_str, signature)
+    except InvalidSignatureError: print("❌ LINE 簽章驗證失敗")
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    """純同步的核心調度器，一行 `async` 都沒有，穩如泰山！"""
+    """此處運作於背景執行緒，不受 LINE 5秒限制，可以好整以暇地等 Gemini 算完"""
     user_text = event.message.text.strip()
-    reply_token = event.reply_token
     user_id = event.source.user_id 
     reply_str = ""
     
@@ -214,15 +191,15 @@ def handle_text_message(event):
             PENDING_CONFIRMATIONS.pop(user_id, None) 
             reply_str = "❌ 抱歉抓錯了！已取消該筆紀錄，請重新輸入。✍️"
     else:
-        # 🛡️ 毫秒級無死角分流
         try:
+            # 即使付費版冷啟動花了 4.5 秒，這裡也能穩穩等它回傳，絕不觸發超時！
             result = analyze_with_gemini_sync(user_text)
-            print("🤖 [LINE LOG] 目前由唯一的 Gemini 大腦執掌中...")
+            print("🤖 [LINE LOG] Gemini 運算成功！")
         except Exception as gemini_err:
-            print(f"❌ Gemini 呼叫受挫 ({gemini_err}) ➡️ 瞬間切換至 Python 代打！")
+            print(f"❌ Gemini 真的罷工 ({gemini_err}) ➡️ 切換至 Python 代打！")
             result = analyze_with_python_fallback(user_text)
         
-        # 意圖分流處理
+        # 意圖處理
         if result.intent == "record" and result.records:
             db_success = save_records_to_db(user_id, result.records)
             if db_success:
@@ -239,11 +216,11 @@ def handle_text_message(event):
         elif result.intent == "chat" or result.intent == "sensitive": reply_str = result.ai_reply
         else: reply_str = "👌"
 
-    # 同步回傳
+    # 🚀 關鍵優化：改用 Push Message 主動推播回使用者的手機上
     try:
         with ApiClient(line_config) as api_client:
-            MessagingApi(api_client).reply_message_with_http_info(
-                ReplyMessageRequest(reply_token=reply_token, messages=[TextMessage(text=reply_str)])
+            MessagingApi(api_client).push_message(
+                PushMessageRequest(to=user_id, messages=[TextMessage(text=reply_str)])
             )
     except Exception as e: 
-        print(f"❌ 訊息回傳 LINE 失敗: {e}")
+        print(f"❌ 主動推播失敗: {e}")
