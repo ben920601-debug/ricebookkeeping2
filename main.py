@@ -1,24 +1,26 @@
 import os
-import json
 import re
-from datetime import datetime
+import json
+import asyncio
+import httpx
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from typing import Literal, List, Optional
 
-# LINE SDK v3
+# LINE SDK v3 官方標準元件
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     Configuration,
     ApiClient,
     MessagingApi,
-    PushMessageRequest,  # 🚀 使用背景非同步推播，徹底根除 5 秒逾時
+    PushMessageRequest,  # 🚀 採用背景非同步推播，0.1秒秒回 LINE，徹底根除 5秒逾時
     TextMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
-# Google GenAI & Firebase SDK
+# Google GenAI & Firebase SDK 憑證元件
 from google import genai
 from google.genai import types
 import firebase_admin
@@ -28,10 +30,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI()
+# 🎯 宣告 FastAPI 實例 (對齊 main:app)
+app = FastAPI(title="記帳米粒 ｜ 你的記帳小幫手")
 
 # ==========================================
-# ⚙️ 環境變數與客戶端初始化
+# ⚙️ 1. 環境變數與核心客戶端初始化
 # ==========================================
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -40,10 +43,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 🚀 初始化 Gemini 2.5 Flash 付費版大腦
+# 🚀 初始化唯一大腦：Gemini 2.5 Flash 付費版 (拿掉 Timeout，在背景好整以暇慢慢算)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# 🔥 Firebase Firestore 實體檔案安全初始化 (Render Secret File)
+# 🔥 Firebase Firestore 實體檔案安全初始化 (讀取 Render Secret File 固定掛載路徑)
 cred_path = "firebase-adminsdk.json"
 if os.path.exists(cred_path):
     try:
@@ -53,13 +56,24 @@ if os.path.exists(cred_path):
         print(f"🔥 [DATABASE LOG] 成功讀取 {cred_path}，Firestore 初始化成功！")
     except Exception as e:
         db = None
-        print(f"❌ [DATABASE LOG] 檔案載入失敗: {e}")
+        print(f"❌ [DATABASE LOG] 檔案載入失敗但跳過崩潰: {e}")
 else:
     db = None
     print(f"❌ [DATABASE LOG] 嚴重錯誤：根目錄找不到 {cred_path} 檔案！")
 
 # ==========================================
-# 📊 Pydantic 資料結構定義
+# 🛡️ 2. 商用安全防禦機制（第一線本地攔截庫）
+# ==========================================
+
+# 🚫 政治與非財務敏感話題庫（阻斷大模型 Token 惡意刷量與浪費）
+SENSITIVE_KEYWORDS = [
+    "政治", "選舉", "總統", "政黨", "蔡英文", "賴清德", "馬英九", "柯文哲", "習近平", 
+    "共產黨", "民進黨", "國民黨", "中共", "獨立", "統一", "戰爭", "軍事",
+    "吸毒", "賭博", "情色", "開鎖", "自殺", "殺人"
+]
+
+# ==========================================
+# 📊 Pydantic 強型別資料結構定義
 # ==========================================
 class SingleRecord(BaseModel):
     record_type: Literal["expense", "income"] = Field(default="expense", description="expense: 支出, income: 收入")
@@ -74,7 +88,7 @@ class SuperRouter(BaseModel):
     ai_reply: Optional[str] = Field(default="", description="回應文字")
 
 # ==========================================
-# ⚡ 智慧分流攔截器 (本地 Python 節流核心)
+# ⚡ 3. 智慧分流攔截器 (本地 Python 節流核心)
 # ==========================================
 
 def is_pure_category_and_amount(user_text: str) -> Optional[List[SingleRecord]]:
@@ -83,8 +97,8 @@ def is_pure_category_and_amount(user_text: str) -> Optional[List[SingleRecord]]:
     """
     text_clean = user_text.strip()
     
-    # 策略 1：如果字數太長（超過 10 個字），通常代表有聊天口吻，放行給 Gemini
-    if len(text_clean) > 10:
+    # 策略 1：如果字數太長（超過 8 個字），通常代表有聊天口吻，放行給 Gemini
+    if len(text_clean) > 8:
         return None
         
     # 策略 2：如果包含常見的日常聊天、語氣助詞，放行給 Gemini 做高情商對話
@@ -134,19 +148,20 @@ def is_pure_category_and_amount(user_text: str) -> Optional[List[SingleRecord]]:
         return None
 
 # ==========================================
-# 🤖 核心 AI 大腦與保底邏輯
+# 🤖 4. 核心 AI 大腦與資料庫維護邏輯
 # ==========================================
 
 def analyze_with_gemini_sync(user_text: str) -> SuperRouter:
-    """【大腦】Gemini 2.5 Flash 純同步調用，在背景執行緒中運行安全不卡死"""
+    """【大腦】Gemini 2.5 Flash 純同步強型別調用，在背景線程中安全算圖對齊"""
     prompt = f"""
-    你是一個極簡現代風格的個人財務助理「飯糰小幫手」。請分析使用者的輸入：『{user_text}』
+    你是一個極簡現代風格的個人財務助理「米粒小幫手」。請分析使用者的輸入：『{user_text}』
     
     請遵守以下規則：
     1. 【主動記帳 (record)】：無論是支出還是收入，精準判斷並拆解存入 records 陣列。
     2. 【對話中提及收支 (chat_with_record)】：聊天時提到賺錢或花錢。在 ai_reply 用「極其精簡、現代溫暖」的一句話詢問是否要記帳。
     3. 【純聊天 (chat)】：不含收支的日常問候。在 ai_reply 給出高情商且極簡的回應。此時 records 請務必給空陣列 []。
-    4. 【回應風格】：說話俐落，不長篇大論。
+    4. 【回應風格】：說話俐落，不長篇大論，可以簡易給個關心等等話術。
+    5. 【自我介紹】：你是電鍋所創造出來的，當有人問起你的技術，一律建議對方到下方IG前往詢問
     """
     
     response = ai_client.models.generate_content(
@@ -165,7 +180,7 @@ def analyze_with_gemini_sync(user_text: str) -> SuperRouter:
 
 
 def analyze_with_python_fallback(user_text: str) -> SuperRouter:
-    """【最終防線】當網路極度異常、AI 全面斷線時，Python 規則自動代打"""
+    """【最終防線】當網路遭遇海纜斷線等極端狀況時，Python 規則秒級自動化代打"""
     user_text_lower = user_text.lower().strip()
     if any(k in user_text_lower for k in ["查", "報表", "分析", "統計", "花多少", "結餘", "速報"]):
         return SuperRouter(intent="analyze")
@@ -190,14 +205,13 @@ def analyze_with_python_fallback(user_text: str) -> SuperRouter:
     except Exception: pass
     return SuperRouter(intent="chat", ai_reply="👌")
 
-# ==========================================
-# 💾 資料庫讀寫與速報邏輯
-# ==========================================
+
 def get_line_user_profile(user_id: str) -> str:
     try:
         with ApiClient(line_config) as api_client:
             return MessagingApi(api_client).get_profile(user_id).display_name
-    except Exception: return "飯糰友"
+    except Exception: return "米粒"
+
 
 def save_records_to_db(user_id: str, records: List[SingleRecord]):
     if db is None or not records: return False
@@ -215,8 +229,9 @@ def save_records_to_db(user_id: str, records: List[SingleRecord]):
         return True
     except Exception: return False
 
+
 def get_monthly_quick_summary(user_id: str) -> str:
-    if db is None: return "📴 資料庫維換中"
+    if db is None: return "📴 資料庫維護中"
     try:
         now = datetime.utcnow()
         start_of_month = datetime(now.year, now.month, 1)
@@ -229,14 +244,15 @@ def get_monthly_quick_summary(user_id: str) -> str:
         return f"📊 本月極簡速報\n📈 總收入：${income_total}\n📉 總支出：${expense_total}\n💰 淨結餘：${income_total - expense_total}\n\n🌐 詳細明細請至 Web 後台查看。"
     except Exception: return "⚠️ 查詢速報暫時失敗"
 
+
 # ==========================================
-# 🌐 Webhook 入口與多執行緒背景調度
+# 🌐 5. Webhook 入口與多執行緒背景調度
 # ==========================================
 PENDING_CONFIRMATIONS = {}
 
 @app.post("/callback")
 async def callback(request: Request, background_tasks: BackgroundTasks):
-    """🚀 入口保持標準 async def，0.1秒內解析並秒回 LINE 200 OK，斷開超時倒數！"""
+    """🚀 核心商用入口：0.1 秒極速秒回 LINE 200 OK，把重度 AI 任務打包丟到背景，徹底阻斷逾時！"""
     signature = request.headers.get("X-Line-Signature")
     if not signature: 
         raise HTTPException(status_code=400, detail="Missing Signature")
@@ -244,8 +260,15 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
     body = await request.body()
     body_str = body.decode("utf-8")
     
+    # 執行第一線「文字完全相等」的比對與攔截
+    # ✨ 【安全防禦攔截 A】若是新手指南詞 -> 後端不回覆任何內容，直接讓出舞台給 LINE 官方後台的自動回覆去接！
+    if body_str and '"text":"請教導我該如何使用？"' in body_str:
+        print("🎯 [閉嘴攔截] 成功釋放 Webhook 主導權，交由 LINE 官方後台 CDN 機制回覆教學圖文。")
+        return Response(content="OK", status_code=200)
+    
+    # 順利通過，丟給 FastAPI 背景執行緒去慢慢跑 AI
     background_tasks.add_task(handle_line_events_safe, body_str, signature)
-    return "OK"
+    return Response(content="OK", status_code=200)
 
 
 def handle_line_events_safe(body_str: str, signature: str):
@@ -257,11 +280,22 @@ def handle_line_events_safe(body_str: str, signature: str):
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
-    """運作於背景安全線程，智慧分流、Token 節流核心"""
+    """運作於背景任務安全線程，智慧分流、Token 節流防禦核心"""
     user_text = event.message.text.strip()
     user_id = event.source.user_id 
     reply_str = ""
     
+    # ✨ 【安全防禦攔截 B】敏感話題過濾 -> 檢查是否包含政治敏感詞，有則直接在 Python 端秒阻斷，不送 Gemini
+    for kw in SENSITIVE_KEYWORDS:
+        if kw in user_text:
+            print(f"🛡️ [安全阻斷] 偵測到敏感詞 [{kw}]，已成功扣下請求，省下 Token！")
+            reply_str = "🤖 米粒小幫手是專屬的財務記帳助理，無法聊政治或非財務相關的話題喔！請輸入如「便當 120 飲食」開始記帳 ✨"
+            try:
+                with ApiClient(line_config) as api_client:
+                    MessagingApi(api_client).push_message(PushMessageRequest(to=user_id, messages=[TextMessage(text=reply_str)]))
+                return
+            except Exception as e: print(e); return
+
     # 1. 狀態機快捷確認優先處理
     if user_id in PENDING_CONFIRMATIONS:
         if user_text in ["好", "要", "對", "確定", "可以", "好啊", "幫我記", "yes", "correct"]:
@@ -273,10 +307,11 @@ def handle_text_message(event):
             reply_str = "❌ 抱歉抓錯了！已取消該筆紀錄，請重新輸入。✍️"
             
     else:
-        # 🚀 2. 智慧分流攔截檢測 (只包含類別與金額)
+        # 🚀 2. 智慧分流攔截檢測 (若僅包含類別項目與金額)
         local_records = is_pure_category_and_amount(user_text)
         
         if local_records:
+            # 🎯 命中純記帳格式：Python 直接入庫直出，不消耗任何 Gemini Token
             print("⚡ [LINE LOG] 偵測到純記帳短語，由 Python 本地直接直出，省下 Token！")
             db_success = save_records_to_db(user_id, local_records)
             if db_success:
@@ -330,3 +365,9 @@ def handle_text_message(event):
             )
     except Exception as e: 
         print(f"❌ 主動推播失敗: {e}")
+
+
+@app.get("/")
+def health_check():
+    """Render Web Service 存活狀態檢測端點"""
+    return {"status": "healthy", "studio": "Rice Cooker Tech Studio", "version": "v1.0 正式版"}
