@@ -214,22 +214,54 @@ def get_line_user_profile(user_id: str) -> str:
 
 
 def save_records_to_db(user_id: str, records: List[SingleRecord]):
-    if db is None or not records: return False
+    # 📋 1. 先確認進來的資料長怎樣
+    print(f"📋 [DEBUG DB] 準備寫入，用戶ID: {user_id}, 筆數: {len(records)}", flush=True)
+    
+    if db is None:
+        print("❌ [DEBUG DB] 失敗原因：db 物件此時為 None！初始化根本沒成功！", flush=True)
+        return False
+    if not records:
+        print("❌ [DEBUG DB] 失敗原因：傳進來的 records 清單是空的！", flush=True)
+        return False
+        
     try:
         user_ref = db.collection("users").document(user_id)
         if not user_ref.get().exists:
-            user_ref.set({"line_user_id": user_id, "display_name": get_line_user_profile(user_id), "created_at": datetime.utcnow()})
+            print(f"ℹ️ [DEBUG DB] 偵測到新用戶，正在建立 users/{user_id} 主文件...", flush=True)
+            user_ref.set({
+                "line_user_id": user_id, 
+                "display_name": get_line_user_profile(user_id), 
+                "created_at": datetime.utcnow()
+            })
+            
         batch = db.batch()
         for rec in records:
-            if rec.amount <= 0: continue
-            batch.set(user_ref.collection("expenses").document(), {
-                "type": rec.record_type, "amount": rec.amount, "item": rec.item, "category": rec.category, "note": rec.note, "timestamp": datetime.utcnow()
+            if rec.amount <= 0: 
+                print(f"⚠️ [DEBUG DB] 金額小於等於 0 ({rec.amount})，此筆跳過！", flush=True)
+                continue
+                
+            # 建立副集合路徑
+            doc_ref = user_ref.collection("expenses").document()
+            batch.set(doc_ref, {
+                "type": rec.record_type, 
+                "amount": rec.amount, 
+                "item": rec.item, 
+                "category": rec.category, 
+                "note": rec.note, 
+                "timestamp": datetime.utcnow()
             })
+            
+        print("⚡ [DEBUG DB] Batch 封裝完畢，正在送往 Firebase...", flush=True)
         batch.commit()
+        print("🎉 [DEBUG DB] Firebase 寫入完全成功！！！", flush=True)
         return True
-    except Exception: return False
-
-
+        
+    except Exception as db_err:
+        # 🎯 這裡會一槍斃命印出為什麼失敗（例如：憑證過期、路徑錯誤、不允許的欄位）
+        print(f"💥 [DEBUG DB] 嚴重崩潰！寫入 Firestore 失敗，真兇報錯為: {db_err}", flush=True)
+        import traceback
+        traceback.print_exc() # 強制印出完整錯誤堆疊
+        return False
 def get_monthly_quick_summary(user_id: str) -> str:
     if db is None: return "📴 資料庫維護中"
     try:
