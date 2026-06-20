@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="飯糰小幫手 ｜ SaaS 雙層防禦完全體")
+app = FastAPI(title="飯糰小幫手 ｜ 強制 Tag 控場無消耗版")
 
 # ==========================================
 # ⚙️ 1. 核心客戶端與資料庫初始化
@@ -42,7 +42,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MY_LIFF_ID = "2010446205-W1G1WDQQ" 
 
 line_config = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-line_handler = WebhookHandler(LINE_CHANNEL_SECRET) # 🎯 變數名稱 100% 固定為 line_handler
+line_handler = WebhookHandler(LINE_CHANNEL_SECRET)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 if os.path.exists("firebase-adminsdk.json"):
@@ -59,7 +59,7 @@ else:
     print("❌ [DATABASE] 嚴重錯誤：根目錄未尋獲 firebase-adminsdk.json！", flush=True)
 
 # ==========================================
-# 🛡️ 2. 全域狀態機與強型別定義
+# 🛡️ 2. 全域型別定義
 # ==========================================
 SENSITIVE_KEYWORDS = ["政治", "選舉", "總統", "政黨", "戰爭", "吸毒", "賭博", "情色", "自殺", "殺人"]
 
@@ -82,7 +82,7 @@ class GroupOrderItem(BaseModel):
 
 class SuperRouter(BaseModel):
     intent: Literal["record", "chat", "analyze", "sensitive", "settlement", "order_item", "order_end", "order_start", "settle_start", "settle_pay", "settle_query"] = Field(
-        description="核心意圖分流。record:普通記帳, chat:普通簡單對話互動"
+        description="核心意圖分流"
     )
     records: Optional[List[SingleRecord]] = Field(default_factory=list)
     settlement: Optional[SingleSettlement] = Field(default=None)
@@ -111,7 +111,7 @@ def send_line_reply(target_id: str, text: str):
         print(f"❌ LINE 推播失敗: {e}", flush=True)
 
 # ==========================================
-# 🌐 4. Webhook 入口與雙層責任防禦線
+# 🌐 4. Webhook 核心流動（強制 Tag 監禁閘門）
 # ==========================================
 @app.post("/callback")
 async def callback(request: Request, background_tasks: BackgroundTasks):
@@ -119,15 +119,12 @@ async def callback(request: Request, background_tasks: BackgroundTasks):
     if not signature: raise HTTPException(status_code=400, detail="Missing Signature")
     body = await request.body()
     body_str = body.decode("utf-8")
-    # 🎯 修正：指定呼叫正確的全域 line_handler 處理排程
     background_tasks.add_task(handle_line_events_safe, body_str, signature)
     return Response(content="OK", status_code=200)
 
 def handle_line_events_safe(body_str: str, signature: str):
-    try: 
-        line_handler.handle(body_str, signature)
-    except InvalidSignatureError: 
-        pass
+    try: line_handler.handle(body_str, signature)
+    except InvalidSignatureError: pass
 
 @line_handler.add(MessageEvent, message=TextMessageContent)
 def handle_text_message(event):
@@ -140,36 +137,7 @@ def handle_text_message(event):
     target_id = event.source.group_id if is_group else creator_id
     root_collection = "groups" if is_group else "users"
 
-    # ----------------------------------------------------
-    # 🛡️ 第一層防禦：Python 邊緣硬核過濾線
-    # ----------------------------------------------------
-    for kw in SENSITIVE_KEYWORDS:
-        if kw in user_text:
-            send_line_reply(target_id, "🤖 飯糰小幫手為純財務平帳系統，請勿探討敏感議題喔！")
-            return
-
-    if user_text in ["使用說明", "怎麼用", "功能", "記帳格式", "規定"]:
-        instructions = (
-            "📝 【飯糰小幫手 ｜ 使用說明書】\n"
-            "-------------------------\n"
-            "💡 「個人記帳」：直接輸入即可！\n"
-            "👉 範例：『午餐 120』、『高鐵 1300』\n\n"
-            "👥 「群組公帳」：(文字內需包含 飯糰 二字)\n"
-            "👉 範例：『飯糰 公開花費 500』\n\n"
-            "🛒 「揪團開單狀態機」：\n"
-            "👉 輸入 『飯糰 開團』 ➡️ 進入過濾點單狀態\n"
-            "👉 輸入 『品項 金額』 ➡️ 網頁自動掛載\n"
-            "👉 輸入 『飯糰 結單』 ➡️ 封存並生成控制代碼\n"
-            "👉 輸入 『訂單結算 #單號』 ➡️ 查看紅綠燈對帳報表"
-        )
-        send_line_reply(target_id, instructions)
-        return
-
-    if not is_group and user_text in ["查帳", "後台", "網址", "登入", "進去"]:
-        send_line_reply(target_id, f"🌐 您的個人無痕雲端帳本後台已就緒：\nhttps://liff.line.me/{MY_LIFF_ID}?userId={target_id}")
-        return
-
-    # 讀取 Firestore 當前模式狀態
+    # 📥 1. 讀取或初始化群組狀態機
     current_mode = "normal"
     active_code = ""
     master_payer_name = ""
@@ -185,22 +153,46 @@ def handle_text_message(event):
         else:
             group_doc_ref.set({"group_id": target_id, "state": "normal", "created_at": datetime.utcnow()})
 
-    # 群組防噪牆
-    is_triggered = False
-    if not is_group:
-        is_triggered = True 
-    else:
-        if any(kw in user_text for kw in ["@飯糰", "飯糰", "開團", "結單", "結算", "對帳", "誰沒", "未付"]): 
-            is_triggered = True
-        elif current_mode == "order" and re.search(r'\d+', user_text): 
-            is_triggered = True
-        elif current_mode == "settle" and any(k in user_text for k in ["給", "還", "付"]): 
-            is_triggered = True
+    # ====================================================
+    # 🚨 🛡️ 【全時段 Tag 監禁閘門】群組環境下，沒被 Tag 一律秒速阻斷！
+    # ====================================================
+    if is_group:
+        is_liff_tagged = False
+        
+        # 檢查 LINE 官方提供的實體 Mention 節點
+        mention = getattr(event.message, "mention", None)
+        if mention and mention.mentionees:
+            is_liff_tagged = True
+            
+        # 檢查文字字串比對保底
+        if any(kw in user_text for kw in ["@飯糰", "飯糰"]):
+            is_liff_tagged = True
+            
+        # 🎯 鐵律：不管目前是什麼模式（常態/點單/結算），只要沒 Tag 訊號，通通視為閒聊雜訊，直接中斷！
+        if not is_liff_tagged:
+            return 
 
-    if not is_triggered: 
-        return  # 日常聊天直接阻斷
-
+    # 清洗掉 Tag 關鍵字，還原純淨內文送給 Gemini 拆解
     user_text = user_text.replace("@飯糰", "").replace("飯糰", "").strip()
+
+    # 🛑 敏感字防線
+    for kw in SENSITIVE_KEYWORDS:
+        if kw in user_text:
+            send_line_reply(target_id, "🤖 飯糰小幫手為純財務平帳系統，請勿探討敏感議題喔！")
+            return
+
+    # 系統固定硬格式回覆
+    if user_text in ["使用說明", "怎麼用", "功能", "規定"]:
+        instructions = (
+            "📝 【飯糰小幫手 使用說明】\n"
+            "⚠️ 群組內所有人發言必須「@飯糰」才會觸發助理！\n"
+            "👉 記帳範例：『@飯糰 早餐 200』\n"
+            "👉 開團範例：『@飯糰 開團』\n"
+            "👉 結單範例：『@飯糰 結單』"
+        )
+        send_line_reply(target_id, instructions)
+        return
+
     creator_name = get_cached_nickname(target_id, creator_id, is_group)
 
     # ----------------------------------------------------
@@ -208,22 +200,23 @@ def handle_text_message(event):
     # ----------------------------------------------------
     try:
         prompt = f"""
-        你是一個幽默、控場能力強的助理「飯糰小幫手」。目前位於【{root_collection}】環境，模式為【{current_mode}】。
-        請分析使用者訊息：『{user_text}』
+        你是一個幽默、控場能力極強的記帳助理「飯糰小幫手」。目前位於【{root_collection}】環境，模式為【{current_mode}】。
+        請透視分析使用者訊息：『{user_text}』
         
-        【任務說明】：
+        【分流任務說明】：
         1. 判定 intent (record, order_start, order_end, order_item, settle_start, settle_pay, settle_query, chat)。
-        2. 若對話含金額，除了拆解強型別外，請在 ai_reply 留下一句 15 字以內非常精簡的確認對話。
-        3. 如果是純問候，intent 設為 "chat"，並在 ai_reply 簡單回覆。
+        2. 如果包含開團、團購開始，為 order_start。
+        3. 如果包含截止、結單、結束、團購結束，為 order_end。
+        4. 如果只是純輸入金額項目（如：早餐 200），為 "record"。
         """
 
         result = ai_client.models.generate_content(
             model='gemini-2.5-flash', contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SuperRouter, temperature=0.2),
+            config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=SuperRouter, temperature=0.1),
         ).parsed
 
-        # A. 常態模式記帳 (record)
-        if result.intent == "record" and current_mode == "normal":
+        # A. 常態/點單模式下的普通 Tag 記帳 (record)
+        if result.intent == "record":
             if result.records:
                 for rec in result.records:
                     if rec.amount > 0:
@@ -231,16 +224,16 @@ def handle_text_message(event):
                             "type": rec.record_type, "amount": rec.amount, "item": rec.item, "category": rec.category,
                             "timestamp": datetime.utcnow(), "created_by_name": creator_name
                         })
-                if result.ai_reply:
-                    send_line_reply(target_id, f"🤖 {result.ai_reply}")
+                # 🪙 依照規定，記帳成功後，發送 LINE 訊息回覆「收到！」
+                send_line_reply(target_id, f"👌 收到！已成功幫 {creator_name} 登記一筆花費至雲端後台。")
 
-        # B. 開團 (order_start)
+        # B. 開團模式 (order_start) ➡️ 必須被 Tag 才會走到這裡
         elif result.intent == "order_start" and is_group:
             code_str = str(random.randint(1000, 9999))
             db.collection("groups").document(target_id).update({"state": "order", "active_order_code": code_str, "order_items_temp": []})
-            send_line_reply(target_id, f"🚀 【飯團團購模式・正式啟動】\n🔢 本團結算編號：#{code_str}\n👉 大家可以開始叫單囉！(網頁端已同步開啟動態點單)")
+            send_line_reply(target_id, f"🚀 【飯團團購模式・正式啟動】\n🔢 本團結算編號：#{code_str}\n👉 請大家點單時同樣記得「@飯糰 品項 金額」叫單喔！")
 
-        # C. 點餐品項蒐集 (order_item)
+        # C. 點餐品項蒐集 (order_item) ➡️ 必須被 Tag 才會搜集
         elif result.intent == "order_item" and current_mode == "order" and is_group:
             if result.order_items:
                 g_ref = db.collection("groups").document(target_id)
@@ -249,10 +242,9 @@ def handle_text_message(event):
                     buyer = creator_name if not item.buyer_name or item.buyer_name == "發話者" else item.buyer_name.strip()
                     temp_items.append({"buyer": buyer, "item": item.item_name, "price": item.price, "timestamp": datetime.utcnow().isoformat()})
                 g_ref.update({"order_items_temp": temp_items})
-                if result.ai_reply:
-                    send_line_reply(target_id, f"📝 {result.ai_reply}")
+                send_line_reply(target_id, f"📝 收到！已幫 {creator_name} 掛載點單品項。")
 
-        # D. 截止結單 (order_end)
+        # D. 截止結單 (order_end) ➡️ 被 Tag 收到截止訊息，封存資料庫並「恢復正常模式」
         elif result.intent == "order_end" and current_mode == "order" and is_group:
             g_ref = db.collection("groups").document(target_id)
             g_data = g_ref.get().to_dict()
@@ -263,20 +255,25 @@ def handle_text_message(event):
                 total_amt = sum(i["price"] for i in temp_items)
                 code_str = g_data.get("active_order_code", str(random.randint(1000, 9999)))
                 
+                # 正式寫入資料庫 orders 封存
                 g_ref.collection("orders").document(f"{datetime.now().strftime('%Y%m%d')}_{code_str}").set({
                     "order_date": datetime.now().strftime("%Y-%m-%d"), "order_code": code_str, "total_amount": total_amt,
                     "master_payer_name": m_payer, "items": temp_items, "timestamp": datetime.utcnow()
                 })
-                send_line_reply(target_id, f"🏁 【團購截止 ｜ 單號 #{code_str}】\n💰 總開銷：${total_amt} 元\n💳 墊款買單：{m_payer}\n🤖 請輸入「訂單結算 #{code_str}」發動控制台。")
+                send_line_reply(target_id, f"🏁 【團購截止 ｜ 單號 #{code_str}】\n💰 總金額：${total_amt} 元\n💳 墊款買單：{m_payer}\n\n🤖 數據已安全封存！群組已「恢復正常常態模式」。")
+            else:
+                send_line_reply(target_id, "🛑 因無人叫單，本團已直接關閉，群組「恢復正常常態模式」。")
+                
+            # 🎯 核心修正：收單截止後，強制更新資料庫，將群組狀態機恢復成正常模式 (normal)
             g_ref.update({"state": "normal", "order_items_temp": []})
 
-        # E. 啟動結算模式 (settle_start)
+        # E. 啟動結算控制台 (settle_start)
         elif result.intent == "settle_start" and is_group:
             match_code = re.search(r'(\d{4})', user_text)
             if match_code:
                 req_code = match_code.group(1)
                 db.collection("groups").document(target_id).update({"state": "settle", "active_order_code": req_code})
-                send_line_reply(target_id, f"🔔 【催款控制台已降臨 ｜ 結算模式】\n🔢 活躍單號：#{req_code}\n🌐 網頁端已同步解鎖「紅綠燈對帳報表」！")
+                send_line_reply(target_id, f"🔔 【結算模式已啟動 ｜ 單號 #{req_code}】\n🌐 網頁後台紅綠燈對帳報表已同步解鎖！核銷請輸入「@飯糰 結算結束」歸位。")
 
         # F. 登記付款核銷 (settle_pay)
         elif result.intent == "settle_pay" and current_mode == "settle" and is_group:
@@ -284,54 +281,20 @@ def handle_text_message(event):
                 s = result.settlement
                 p_name = creator_name if s.payer_name == "發話者" or not s.payer_name else s.payer_name.strip()
                 r_name = master_payer_name if s.receiver_name == "發話者" or not s.receiver_name else s.receiver_name.strip()
-                
                 if p_name != r_name:
                     db.collection("groups").document(target_id).collection("settlements").document().set({
                         "payer_name": p_name, "receiver_name": r_name, "amount": s.amount, "order_code_ref": active_code, "timestamp": datetime.utcnow()
                     })
-                if result.ai_reply:
-                    send_line_reply(target_id, f"🤝 {result.ai_reply}")
+                send_line_reply(target_id, f"✅ 收到！已核銷登記 {p_name} 還給 {r_name} ${s.amount} 元。")
 
-        # G. 智慧查詢對帳明細 (settle_query)
-        elif result.intent == "settle_query" and current_mode == "settle" and is_group:
-            orders = db.collection("groups").document(target_id).collection("orders").where("order_code", "==", active_code).stream()
-            order_doc = None # 🎯 修正：將錯誤的 null 改回 Python 正確的 None
-            for doc in orders: 
-                order_doc = doc.to_dict()
-                break
-            
-            if order_doc:
-                expected = {}
-                for i in order_doc.get("items", []):
-                    expected[i["buyer"]] = expected.get(i["buyer"], 0) + i["price"]
-                    
-                settles = db.collection("groups").document(target_id).collection("settlements").where("order_code_ref", "==", active_code).stream()
-                actual = {}
-                for s in settles:
-                    s_data = s.to_dict()
-                    actual[s_data.get("payer_name")] = actual.get(s_data.get("payer_name"), 0) + s_data.get("amount", 0)
-                
-                unpaid = []
-                for p, amt in expected.items():
-                    paid_amt = actual.get(p, 0)
-                    if paid_amt >= amt:
-                        continue
-                    elif paid_amt > 0:
-                        unpaid.append(f" 🟡 {p} 已付 ${paid_amt} (還差 ${amt-paid_amt} 元)")
-                    else:
-                        unpaid.append(f" 🔴 {p} 尚未付款 🪙 應付：${amt} 元")
-                        
-                reply_report = f"📊 【訂單 #{active_code} 實時對帳催款單】\n-------------------------\n"
-                reply_report += "🎉 太讚了！全員皆已付清！" if not unpaid else "\n".join(unpaid)
-                send_line_reply(target_id, reply_report)
-
-        # H. 簡單對話互動 (chat)
-        elif result.intent == "chat" and result.ai_reply:
-            send_line_reply(target_id, f"🤖 {result.ai_reply}")
+        # G. 結束結算模式
+        elif "結算結束" in user_text and current_mode == "settle" and is_group:
+            db.collection("groups").document(target_id).update({"state": "normal"})
+            send_line_reply(target_id, "🔓 結算完畢！群組已「恢復正常常態模式」。")
 
     except Exception as e:
-        print(f"🧠 第二層 Gemini 大腦運算或欄位解析異常: {e}")
+        print(f"🧠 大腦解析異常: {e}")
 
 @app.get("/")
 def health_check(): 
-    return {"status": "optimized_dual_layer_active", "version": "v5.6-SaaS-Fix"}
+    return {"status": "strict_mention_mode_active", "version": "v6.0-SaaS-StrictTag"}
