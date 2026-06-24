@@ -567,4 +567,4 @@ def handle_text_message(event):
 
 @app.get("/")
 def health_check(): 
-    return {"status": "sqlite_active", "version": "v12.0-SQLite-Migration"}
+    return {"status": "fast_regex_active", "version": "v11.0-Perfect-Name-Display"}
