@@ -248,7 +248,7 @@ def handle_text_message(event):
     if is_group and current_mode == "settle":
         if any(k in user_text for k in ["結算結束", "關閉結算", "核銷截止", "核銷完畢","截止","結束"]):
             db.collection("groups").document(target_id).update({"state": "normal", "active_order_code": ""})
-            send_line_reply(reply_token, "🔓 結算完畢！已安全關閉對帳並恢復常態模式。")
+            send_line_reply(reply_token, "🔓 結算完畢！已安全關閉對帳並恢復常一般模式。")
             return
 
         if any(k in user_text for k in ["給", "還", "付", "收", "核銷"]):
@@ -472,4 +472,4 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8003)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
