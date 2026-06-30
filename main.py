@@ -32,12 +32,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = FastAPI(title="記帳米粒 ｜ 暱稱完美顯示版")
+app = FastAPI(title="記帳米粒 ｜ V1.1說明與關鍵字優化版")
 
-# 🎯 加入 CORS 跨域設定，允許您的 LIFF 網頁來抓取 API 資料
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允許所有網域請求
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -69,9 +68,37 @@ else:
     print("❌ [DATABASE] 嚴重錯誤：未尋獲 firebase-adminsdk.json！", flush=True)
 
 # ==========================================
-# 🛡️ 2. 全域型別定義
+# 🛡️ 2. 全域型別與 V1.1 特定詞設定
 # ==========================================
 SENSITIVE_KEYWORDS = ["政治", "選舉", "總統", "政黨", "戰爭", "吸毒", "賭博", "情色", "自殺", "殺人"]
+
+# 🚀 V1.1 新增：特定詞觸發指定回覆話語（快速硬編碼攔截層）
+SPECIFIC_KEYWORDS = {
+    "電鍋": (
+        "說到電鍋我最熟了，畢竟他也是我的創造者！\n"
+        "他創造我之外呢，也創造了飯匙在不同地方服務大眾😄\n"
+        "如有興趣，歡迎到下方點選前往IG或是找@denguword1220\n"
+        "非常期待與您有更多的互動😆"
+
+    ),
+    "思妤是誰？": (
+        "思妤是一個瘋女人！\n"
+        "電鍋都會叫他狗東西\n"
+        "因為他真的太狗了，快受不了\n"
+        "好啦，還是很喜歡他的，嘻嘻😁"
+    ),
+    "欣俞是誰？": (
+        "欣俞是一個非常稱職的店長媽媽！\n"
+        "因為他三不五時要照顧我們這些小朋友\n"
+        "儘管他很累，但總是先為我們著想\n"
+        "謝謝媽媽👩"
+    ),
+    "哲宇是誰？": (
+        "哲宇是一個非常稱職的店長！\n"
+        "沒有他管不好的店，只有聽不懂人話員工\n"
+        "尤其是他吼人的時候好帥喔😆"
+    )
+}
 
 class SingleRecord(BaseModel):
     record_type: Literal["expense", "income"] = Field(default="expense")
@@ -121,7 +148,6 @@ def get_real_mentions(event) -> list:
             if u_id:
                 try:
                     tagged_text = text[m.index : m.index + m.length]
-                    # 如果 Tag 到的名字包含「米粒」，判定為機器人自己，直接略過
                     if "米粒" in tagged_text:
                         continue
                 except:
@@ -133,10 +159,8 @@ def fetch_line_profile_name(user_id: str, target_id: str = None) -> str:
     """🎯 核心修復：升級為群組成員 API，未加好友也能抓到真實暱稱"""
     headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
     
-    # 1. 優先嘗試「群組/聊天室 成員 API」
     if target_id:
         url = None
-        # 判斷是標準群組 (C) 還是多人聊天室 (R)
         if target_id.startswith("C"):
             url = f"https://api.line.me/v2/bot/group/{target_id}/member/{user_id}"
         elif target_id.startswith("R"):
@@ -144,17 +168,14 @@ def fetch_line_profile_name(user_id: str, target_id: str = None) -> str:
             
         if url:
             try:
-                # 💡 建議加上 follow_redirects=True 防呆
                 res = httpx.get(url, headers=headers, timeout=5.0, follow_redirects=True)
                 if res.status_code == 200:
                     return res.json().get("displayName", f"成員({user_id[:4]})")
                 else:
-                    # 印出錯誤日誌，方便你看到底是哪一個網址變成了 404
                     print(f"⚠️ LINE API 回傳狀態碼: {res.status_code}, 網址: {res.url}", flush=True)
             except Exception as e:
                 print(f"⚠️ 請求群組 API 異常: {e}", flush=True)
             
-    # 2. 退回使用「全域好友 API」
     url = f"https://api.line.me/v2/bot/profile/{user_id}"
     try:
         res = httpx.get(url, headers=headers, timeout=5.0, follow_redirects=True)
@@ -174,7 +195,6 @@ def resolve_id_to_name(target_id: str, user_id: str) -> str:
         if doc_snap.exists:
             return doc_snap.to_dict().get("display_name", f"成員({user_id[:4]})")
         else:
-            # 傳遞 target_id 給 fetch_line_profile_name 以觸發群組 API
             real_name = fetch_line_profile_name(user_id, target_id)
             member_ref.set({"user_id": user_id, "display_name": real_name, "updated_at": datetime.utcnow()})
             return real_name
@@ -259,7 +279,7 @@ def handle_text_message(event):
     if is_group and current_mode == "settle":
         if any(k in user_text for k in ["結算結束", "關閉結算", "核銷截止", "核銷完畢","截止","結束"]):
             db.collection("groups").document(target_id).update({"state": "normal", "active_order_code": ""})
-            send_line_reply(reply_token, "🔓 結算完畢！已安全關閉對帳並恢復常一般模式。")
+            send_line_reply(reply_token, "🔓 結算完畢！已安全關閉對帳並恢復一般模式。")
             return
 
         if any(k in user_text for k in ["給", "還", "付", "收", "核銷"]):
@@ -268,7 +288,6 @@ def handle_text_message(event):
             settle_amount = int(amount_match.group()) if amount_match else 0
             if settle_amount <= 0: return
 
-            # 🎯 使用新的智慧 Tag 過濾機制
             real_tagged_ids = get_real_mentions(event)
 
             if len(real_tagged_ids) >= 2:
@@ -314,31 +333,42 @@ def handle_text_message(event):
                     send_line_reply(reply_token, f"✅ 【單號 #{active_code} 核銷成功】\n💸 付款：{payer_name_str}\n📥 收款：{receiver_name_str}\n💰 紀錄金額：${settle_amount}")
                 return
 
+    # 移除 Tag 符號以利後續關鍵字或 Regex 精準匹配
     clean_text = user_text.replace("@記帳米粒", "").replace("記帳米粒", "").strip()
 
     # ====================================================
-    # 📖 【Python 層攔截：系統說明書與報表派發】
+    # 🎯 ⚡ 【V1.1 Python 層攔截：新增特定詞觸發指定回覆】
+    # ====================================================
+    for kw, reply_msg in SPECIFIC_KEYWORDS.items():
+        if kw in clean_text:
+            send_line_reply(reply_token, reply_msg)
+            return
+
+    # ====================================================
+    # 📖 【Python 層攔慢截：系統說明書與報表派發】
     # ====================================================
     if any(k in clean_text for k in ["報表", "查帳", "大後台", "網址", "網站", "入口", "登入"]) and current_mode == "normal":
         send_line_reply(reply_token, f"📊 【記帳米粒 ｜ 雲端監控後台】\n🟢 入口如下：\nhttps://liff.line.me/{MY_LIFF_ID}?groupId={target_id}")
         return
 
+    # 配合 V1.1 更新：精簡優化版的使用說明導覽
     if any(k in clean_text for k in ["使用說明", "怎麼用", "功能", "規定", "教學"]):
         instructions = (
-            "📝 【記帳米粒 ｜ 使用說明書】\n"
+            "🌾 【記帳米粒 | 快速上手指南】\n"
             "-------------------------\n"
-            "💡 「一般模式記帳」：\n"
-            "👉 範例：『@記帳米粒 午餐 120』\n\n"
-            "🛒 「團購模式：代點單」：\n"
-            "👉 啟動：『@記帳米粒 開團』\n"
-            "👉 自己點：『@記帳米粒 雞排 100』\n"
-            "👉 幫人點：『@記帳米粒 @小明 珍奶 50』\n"
-            "👉 結單：『@記帳米粒 結單』\n\n"
-            "💳 「核銷模式：防呆平帳」：\n"
-            "👉 啟動：『@記帳米粒 申請核銷 #單號』\n"
-            "👉 代收：『@記帳米粒 @小明 給我 100』\n"
-            "👉 自核：『@記帳米粒 我核銷 100』\n"
-            "👉 關閉：『@記帳米粒 結算結束』"
+            "💰 1. 一般記帳 \n"
+            "👉 輸入「項目 金額」即可\n"
+            "   └ 範例：早餐 80 元\n\n"
+            "🛒 2. 團隊開團 (揪團模式)\n"
+            "👉 輸入「開團」啟動專屬單號\n"
+            "   └ 自點：冰美式 55\n"
+            "   └ 代點：@小明 雞排 95\n"
+            "   └ 結單：輸入「結單」鎖定明細\n\n"
+            "💳 3. 防呆核銷 (對帳模式)\n"
+            "👉 輸入「申請核銷 #單號」解鎖\n"
+            "   └ 銷帳：@大明 已還 100\n"
+            "   └ 關閉：輸入「結算結束」恢復常態\n\n"
+            "📊 輸入「查帳」或「報表」可開啟監控後台網址！"
         )
         send_line_reply(reply_token, instructions)
         return
@@ -369,7 +399,6 @@ def handle_text_message(event):
                 return
                 
             elif current_mode == "order" and is_group:
-                # 🎯 使用新的智慧 Tag 過濾機制
                 real_tagged_ids = get_real_mentions(event)
                         
                 actual_buyer_id = real_tagged_ids[0] if real_tagged_ids else creator_id
@@ -431,7 +460,6 @@ def handle_text_message(event):
                 g_ref = db.collection("groups").document(target_id)
                 temp_items = g_ref.get().to_dict().get("order_items_temp", [])
                 
-                # 🎯 使用新的智慧 Tag 過濾機制
                 real_tagged_ids = get_real_mentions(event)
                 actual_buyer_id = real_tagged_ids[0] if real_tagged_ids else creator_id
                 actual_buyer_name = resolve_id_to_name(target_id, actual_buyer_id)
@@ -479,8 +507,8 @@ def handle_text_message(event):
 
 @app.get("/")
 def health_check(): 
-    return {"status": "fast_regex_active", "version": "v11.0-Perfect-Name-Display"}
+    return {"status": "fast_regex_active", "version": "v1.1-Instruction-Optimized"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8001)
